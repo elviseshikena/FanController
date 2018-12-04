@@ -2,6 +2,7 @@
  * FanController
  * MSE 352 Fall 2018 Course Project
  * TM4C123GH6PM
+ * JK.EE
  * License in LICENSE
 */
 
@@ -22,16 +23,15 @@
 
 // Macros
 #define TACH_FREQ                   10          // Hz Frequency of tachometer interrupt
-#define DISP_FREQ                   60000       // Hz Frequency of display refresh
 #define ADC_FREQ                    20000       // Hz Frequency of ADC interrupt
-#define CNTRL_FREQ                  100         // Hz Frequency of control cycle
-#define PWM_FREQUENCY               55          // Hz Frequency of PWM signal
+#define CNTRL_FREQ                  20000       // Hz Frequency of control cycle
+#define PWM_FREQUENCY               20000       // Hz Frequency of PWM signal
 #define TACH_TIMER_LOAD             10000       // Count Edge-count reference
 #define NUM_7SEG_MODULES            3           // Number of 7 segment modules
 #define BCD_BITS                    4           // Number of bits in the BCD code
-#define MAX_TACH_SAMPLES            10          // Samples averaged by the tachometer
-#define MAX_PWM_ADJUST              10000
-#define MIN_PWM_ADJUST              53
+#define MAX_TACH_SAMPLES            5          // Samples averaged by the tachometer
+#define MAX_ADJUST                  900         // Maximum PWM adjust value
+#define MIN_ADJUST                  50         // Minimum PWM adjust value
 
 // Variables ------------------------------------------------------------------
 uint32_t ui32PWMClock;
@@ -41,10 +41,13 @@ uint32_t ui32TachPulses;
 uint32_t ui32FanRPM;
 uint32_t ui32PotAdcMap;
 uint8_t ui8SampleCount;
-double pADC;
-double pRPM;
-double err;
-int period;
+
+uint32_t divisor;
+uint32_t digit[NUM_7SEG_MODULES];
+uint8_t bits[BCD_BITS];
+uint8_t module;
+uint8_t val;
+uint8_t bitmask;
 
 // Prototypes  ----------------------------------------------------------------
 void InitADC(void);
@@ -55,11 +58,12 @@ void InitDisplay(void);
 void ADCIntHandler(void);
 void TachIntHandler(void);
 void ControlIntHandler(void);
-void DisplayIntHandler(void);
+void DisplayHandler(void);
 
 // MAIN -----------------------------------------------------------------------
 void main(void)
 {
+
     // Set clock to 40MHz
     SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
 
@@ -74,7 +78,10 @@ void main(void)
     IntMasterEnable();
 
     // Loop
-    while(1);
+    while(1)
+    {
+        DisplayHandler();
+    }
 }
 
 // FUNCTION DEFS --------------------------------------------------------------
@@ -149,7 +156,7 @@ void InitTach(void)
 // Initialize PWM on PD0
 void InitPWM(void)
 {
-    ui32Adjust = 50;
+    ui32Adjust = MIN_ADJUST;
     // Set PWM Clock for 625kHz
     SysCtlPWMClockSet(SYSCTL_PWMDIV_64);
 
@@ -202,18 +209,6 @@ void InitDisplay(void)
     GPIOPadConfigSet(GPIO_PORTC_BASE, 
         GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6,
         GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_WAKE_LOW);
-
-    // Setup timer for 7-Segment
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
-    TimerConfigure(TIMER3_BASE, TIMER_CFG_PERIODIC);
-    TimerLoadSet(TIMER3_BASE, TIMER_A, SysCtlClockGet()/DISP_FREQ);
-    // Setup Interrupt
-    IntEnable(INT_TIMER3A);
-    TimerIntEnable(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
-    TimerIntRegister(TIMER3_BASE, TIMER_A, *DisplayIntHandler);
-   
-    // Enable Timer3A
-    TimerEnable(TIMER3_BASE, TIMER_A);
 
     return;
 }
@@ -286,23 +281,22 @@ void TachIntHandler(void)
 void ControlIntHandler(void)
 {
     // Disable and clear timer interrupt
-    TimerIntDisable(TIMER4_BASE, TIMER_TIMA_TIMEOUT);
     TimerIntClear(TIMER4_BASE, TIMER_TIMA_TIMEOUT);
 
     // Calculate %ADC
-    pADC = 100.0 * (double)ui32PotAdcMap/4095.0;
-    // Calculate %RPM
-    pRPM = 100.0 * (double)ui32FanRPM/2400.;
-
-    // Get error;
-    err = pADC - pRPM;
-
-    // Obtain pulse width
-    ui32Adjust = (900 * ui32PotAdcMap)/4095.0;
+    ui32Adjust = (1000 * ui32PotAdcMap)/4095.0;
+    if (ui32Adjust < MIN_ADJUST)
+    {
+        ui32Adjust = MIN_ADJUST;
+    }
+    else if (ui32Adjust > MAX_ADJUST)
+    {
+        ui32Adjust = MAX_ADJUST;
+    }
 
     // Modify pulse width
     PWMPulseWidthSet(PWM1_BASE, PWM_OUT_0, ui32Adjust * ui32Load / 1000);
-    // period = PWMGenPeriodGet(PWM1_BASE, PWM_GEN_0) * ui32PotAdcMap / 4095;
+
     // Re-enable timer interrupt
     TimerIntEnable(TIMER4_BASE, TIMER_TIMA_TIMEOUT);
 
@@ -310,18 +304,9 @@ void ControlIntHandler(void)
 }
 
 // Display speed on the 7-Segment Timer3
-void DisplayIntHandler(void)
+void DisplayHandler(void)
 {
     // Clear and disable timer
-    TimerIntDisable(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
-    TimerIntClear(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
-
-    uint32_t divisor;
-    uint32_t digit[NUM_7SEG_MODULES];
-    uint8_t bits[BCD_BITS];
-    uint8_t module;
-    uint8_t val;
-    uint8_t bitmask;
     int i;
     int j;
 
@@ -365,17 +350,15 @@ void DisplayIntHandler(void)
           val >>= 1;
         }
 
-        // Select module and set pin values
-        GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, module);
+
         // Write on display pins ABCD
         GPIOPinWrite(GPIO_PORTA_BASE,
-                     GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, bitmask); // A  MSB
+                    GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, bitmask); // A  MSB
+        // Select module and set pin values
+        GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, module);
 
         module <<= 1; // Left-shift bits for next GPIO Pin (2<<4<<8);
     }
-
-    // Re-enable interrupt
-    TimerIntEnable(TIMER3_BASE, TIMER_TIMA_TIMEOUT);
 
     return;
 }
