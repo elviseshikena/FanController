@@ -2,8 +2,8 @@
  * FanController
  * MSE 352 Fall 2018 Course Project
  * TM4C123GH6PM
- * JK.EE
  * License in LICENSE
+ * JK.EE
 */
 
 #include <stdint.h>
@@ -24,14 +24,15 @@
 // Macros
 #define TACH_FREQ                   10          // Hz Frequency of tachometer interrupt
 #define ADC_FREQ                    20000       // Hz Frequency of ADC interrupt
-#define CNTRL_FREQ                  20000       // Hz Frequency of control cycle
+#define CNTRL_FREQ                  2000        // Hz Frequency of control cycle
 #define PWM_FREQUENCY               20000       // Hz Frequency of PWM signal
 #define TACH_TIMER_LOAD             10000       // Count Edge-count reference
 #define NUM_7SEG_MODULES            3           // Number of 7 segment modules
 #define BCD_BITS                    4           // Number of bits in the BCD code
-#define MAX_TACH_SAMPLES            5          // Samples averaged by the tachometer
-#define MAX_ADJUST                  900         // Maximum PWM adjust value
-#define MIN_ADJUST                  50         // Minimum PWM adjust value
+#define MAX_TACH_SAMPLES            5           // Samples averaged by the tachometer
+#define INIT_ADJUST                 50          // Initialization of the adjust value
+#define MIN_ADJUST                  50          // Minimum PWM adjust value
+#define MAX_ADJUST                  950        // Maximum PWM adjust value
 
 // Variables ------------------------------------------------------------------
 uint32_t ui32PWMClock;
@@ -41,6 +42,9 @@ uint32_t ui32TachPulses;
 uint32_t ui32FanRPM;
 uint32_t ui32PotAdcMap;
 uint8_t ui8SampleCount;
+double pADC;
+double pRPM;
+double pErr;
 
 uint32_t divisor;
 uint32_t digit[NUM_7SEG_MODULES];
@@ -71,8 +75,8 @@ void main(void)
     InitADC();
     InitTach();
     InitPWM();
-    InitControl();
     InitDisplay();
+    InitControl();
 
     // Enable all interrupts
     IntMasterEnable();
@@ -85,7 +89,6 @@ void main(void)
 }
 
 // FUNCTION DEFS --------------------------------------------------------------
-
 // Initializations ----------------------------------------
 // Initialize ADC on PD1
 void InitADC(void)
@@ -156,7 +159,7 @@ void InitTach(void)
 // Initialize PWM on PD0
 void InitPWM(void)
 {
-    ui32Adjust = MIN_ADJUST;
+    ui32Adjust = INIT_ADJUST;
     // Set PWM Clock for 625kHz
     SysCtlPWMClockSet(SYSCTL_PWMDIV_64);
 
@@ -213,7 +216,7 @@ void InitDisplay(void)
     return;
 }
 
-// Initialize control event Timer4-10ms
+// Initialize control event Timer4
 void InitControl(void)
 {
     // Setup timer for control
@@ -224,7 +227,7 @@ void InitControl(void)
     IntEnable(INT_TIMER4A);
     TimerIntEnable(TIMER4_BASE, TIMER_TIMA_TIMEOUT);
     TimerIntRegister(TIMER4_BASE, TIMER_A, *ControlIntHandler);
-   
+
     // Enable Timer4A
     TimerEnable(TIMER4_BASE, TIMER_A);
 
@@ -281,10 +284,19 @@ void TachIntHandler(void)
 void ControlIntHandler(void)
 {
     // Disable and clear timer interrupt
+    TimerIntDisable(TIMER4_BASE, TIMER_TIMA_TIMEOUT);
     TimerIntClear(TIMER4_BASE, TIMER_TIMA_TIMEOUT);
 
+    ui32Adjust = ((MAX_ADJUST-MIN_ADJUST) * ui32PotAdcMap)/4095.0 + MIN_ADJUST;
+
     // Calculate %ADC
-    ui32Adjust = (1000 * ui32PotAdcMap)/4095.0;
+    pADC = 100 - 100 * ui32PotAdcMap / 4095.0;
+    // Calculate %RPM
+    pRPM = 100 * ui32FanRPM / 2400.;
+    // Calculate %err
+    pErr = pADC - pRPM;
+
+    // Check boundaries
     if (ui32Adjust < MIN_ADJUST)
     {
         ui32Adjust = MIN_ADJUST;
@@ -303,6 +315,7 @@ void ControlIntHandler(void)
     return;
 }
 
+// Helper Routines ----------------------------------------
 // Display speed on the 7-Segment Timer3
 void DisplayHandler(void)
 {
@@ -358,6 +371,7 @@ void DisplayHandler(void)
         GPIOPinWrite(GPIO_PORTC_BASE, GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, module);
 
         module <<= 1; // Left-shift bits for next GPIO Pin (2<<4<<8);
+        SysCtlDelay(40000);
     }
 
     return;
